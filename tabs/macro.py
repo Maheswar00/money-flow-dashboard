@@ -3,6 +3,11 @@ import pandas as pd
 
 def render(assets, prices: pd.DataFrame, momentum_window: int):
     st.subheader("🌍 Macro Capital Flow Dashboard")
+    
+    # Always show what was loaded
+    #st.write("Loaded macro columns:", prices.columns.tolist())
+    #st.write("Missing values per asset:", prices.isna().sum())
+    st.write("Latest data:", prices.tail())
 
     if prices is None or prices.empty:
         st.warning("No macro price data.")

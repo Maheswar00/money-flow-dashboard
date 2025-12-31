@@ -168,4 +168,13 @@ with tab_signals:
 with tab_playbook:
     playbook.render()
 
+with st.sidebar:
+    if st.button("Clear Cache"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.experimental_rerun()
+
+
+
+
 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

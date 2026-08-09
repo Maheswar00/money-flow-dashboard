@@ -47,32 +47,29 @@ def load_intraday_volume_data(tickers, history_days, interval):
 def load_price_history(tickers, period, interval):
     return load_price_data(tickers, period, interval)
 
-print("SPY test:", yf.download("SPY", period="1y", interval="1d").head())
+
+def _extract_close_column(df, ticker):
+    """Pull a single ticker's Close series out of a (possibly batched) download."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    if isinstance(df.columns, pd.MultiIndex):
+        if "Close" not in df.columns.get_level_values(0):
+            return None
+        close = df["Close"]
+        if ticker in close.columns:
+            return close[ticker]
+        # Single-ticker batch call still yields one column - take it.
+        return close.iloc[:, 0] if close.shape[1] == 1 else None
+
+    if "Close" in df.columns:
+        return df["Close"]
+
+    return None
 
 
 @st.cache_data(ttl=3600)
 def load_macro_universe():
-    import pandas as pd
-    import yfinance as yf
-
-    # -----------------------------
-    # Helper: extract Close prices
-    # -----------------------------
-    def extract_close(df):
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return None
-
-        # MultiIndex columns (your current case)
-        if isinstance(df.columns, pd.MultiIndex):
-            if "Close" in df.columns.get_level_values(0):
-                return df["Close"].iloc[:, 0]
-
-        # Old single-index format
-        if "Close" in df.columns:
-            return df["Close"]
-
-        return None
-
     # -----------------------------
     # Asset universe
     # -----------------------------
@@ -99,58 +96,57 @@ def load_macro_universe():
     clean = {}
 
     # -----------------------------
-    # Download + clean loop
+    # One batched request for every primary ticker, instead of
+    # a separate network round-trip per asset.
     # -----------------------------
+    primary_tickers = list(assets.values())
+    try:
+        primary_df = yf.download(primary_tickers, period="1y", interval="1d", progress=False)
+    except Exception as e:
+        print(f"⚠ Error batch-fetching primary tickers: {e}")
+        primary_df = pd.DataFrame()
+
+    missing = {}
     for label, ticker in assets.items():
-        series = None
-
-        # Primary ticker
-        try:
-            df = yf.download(ticker, period="1y", interval="1d", progress=False)
-            close = extract_close(df)
-
-            if isinstance(close, pd.Series):
-                s = close.dropna()
-                if not s.empty:
-                    series = s
-                else:
-                    print(f"⚠ Empty Close data for {label} ({ticker})")
-            else:
-                print(f"⚠ No Close price found for {label} ({ticker})")
-
-        except Exception as e:
-            print(f"⚠ Error fetching {label} ({ticker}): {e}")
-
-        # Fallback ticker
-        if series is None and label in fallback:
-            alt = fallback[label]
-            try:
-                df_alt = yf.download(alt, period="1y", interval="1d", progress=False)
-                close_alt = extract_close(df_alt)
-
-                if isinstance(close_alt, pd.Series):
-                    s_alt = close_alt.dropna()
-                    if not s_alt.empty:
-                        series = s_alt
-                        print(f"✅ Using fallback for {label}: {alt}")
-                    else:
-                        print(f"⚠ Fallback Close empty for {label} ({alt})")
-                else:
-                    print(f"⚠ Fallback missing Close for {label} ({alt})")
-
-            except Exception as e:
-                print(f"⚠ Error fetching fallback {label} ({alt}): {e}")
-
-        # Store valid series
-        if isinstance(series, pd.Series) and not series.empty:
-            clean[label] = series
+        series = _extract_close_column(primary_df, ticker)
+        if isinstance(series, pd.Series):
+            s = series.dropna()
         else:
-            print(f"❌ No valid data for {label}")
+            s = None
+
+        if s is not None and not s.empty:
+            clean[label] = s
+        else:
+            missing[label] = ticker
 
     # -----------------------------
-    # Final assembly
+    # Second batched request covering only the tickers that need
+    # a fallback (usually zero, occasionally one or two) - never
+    # one request per asset.
     # -----------------------------
-    print("DEBUG clean keys:", list(clean.keys()))
+    fallback_needed = {
+        label: fallback[label] for label in missing if label in fallback
+    }
+    if fallback_needed:
+        fallback_tickers = list(fallback_needed.values())
+        try:
+            fallback_df = yf.download(fallback_tickers, period="1y", interval="1d", progress=False)
+        except Exception as e:
+            print(f"⚠ Error batch-fetching fallback tickers: {e}")
+            fallback_df = pd.DataFrame()
+
+        for label, alt in fallback_needed.items():
+            series = _extract_close_column(fallback_df, alt)
+            s = series.dropna() if isinstance(series, pd.Series) else None
+            if s is not None and not s.empty:
+                clean[label] = s
+                print(f"✅ Using fallback for {label}: {alt}")
+            else:
+                print(f"❌ No valid data for {label} (primary {assets[label]}, fallback {alt})")
+
+    for label in missing:
+        if label not in fallback:
+            print(f"❌ No valid data for {label} ({assets[label]}), no fallback configured")
 
     if not clean:
         return assets, pd.DataFrame()

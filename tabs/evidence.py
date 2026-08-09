@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from utils.indicators import chaikin_money_flow, money_flow_index, on_balance_volume, dollar_volume
-from utils.scoring import COT_MATCH, _WEIGHTS
+from utils.scoring import COT_MATCH, _WEIGHTS, window_label
 from utils.theming import verdict_badge_html
 
 
@@ -16,17 +16,19 @@ def _rolling_flow_ratio(close: pd.Series, volume: pd.Series, window: int) -> pd.
     return signed.rolling(window).sum() / dv.rolling(window).sum()
 
 
-def _component_breakdown(entry: dict):
+def _component_breakdown(entry: dict, frame: pd.DataFrame):
+    idx = frame.index if frame is not None else None
     rows = [
-        {"Component": "Chaikin Money Flow", "Value": f"{entry['cmf']:+.3f}", "Weight": f"{_WEIGHTS['cmf']:.0%}"},
-        {"Component": "20D dollar-flow ratio", "Value": f"{entry['flow_ratio_20d']:+.3f}", "Weight": f"{_WEIGHTS['flow_ratio']:.0%}"},
-        {"Component": "Money Flow Index", "Value": f"{entry['mfi']:.1f}", "Weight": f"{_WEIGHTS['mfi']:.0%}"},
+        {"Component": "Chaikin Money Flow", "Window": window_label(idx, 20) or "—", "Value": f"{entry['cmf']:+.3f}", "Weight": f"{_WEIGHTS['cmf']:.0%}", "Scored?": "Yes"},
+        {"Component": "20D dollar-flow ratio", "Window": entry.get("window_20d") or "—", "Value": f"{entry['flow_ratio_20d']:+.3f}", "Weight": f"{_WEIGHTS['flow_ratio']:.0%}", "Scored?": "Yes"},
+        {"Component": "5D dollar-flow ratio", "Window": entry.get("window_5d") or "—", "Value": f"{entry['flow_ratio_5d']:+.3f}" if entry.get("flow_ratio_5d") == entry.get("flow_ratio_5d") else "n/a", "Weight": "—", "Scored?": "No — shown for context only"},
+        {"Component": "Money Flow Index", "Window": window_label(idx, 14) or "—", "Value": f"{entry['mfi']:.1f}", "Weight": f"{_WEIGHTS['mfi']:.0%}", "Scored?": "Yes"},
     ]
     if entry["has_cot"]:
         cot_val = "n/a" if entry["cot_component"] is None else f"{entry['cot_component']:+.2f}"
-        rows.append({"Component": "CFTC institutional positioning", "Value": cot_val, "Weight": f"{_WEIGHTS['cot']:.0%}"})
+        rows.append({"Component": "CFTC institutional positioning", "Window": "most recent weekly report", "Value": cot_val, "Weight": f"{_WEIGHTS['cot']:.0%}", "Scored?": "Yes"})
     else:
-        rows.append({"Component": "CFTC institutional positioning", "Value": "no futures match", "Weight": "excluded"})
+        rows.append({"Component": "CFTC institutional positioning", "Window": "—", "Value": "no futures match", "Weight": "excluded", "Scored?": "No"})
     return pd.DataFrame(rows)
 
 
@@ -48,9 +50,16 @@ def render(scores: list, flow_data: dict, cot_df: pd.DataFrame, crypto_dominance
         st.markdown(verdict_badge_html(entry["verdict"]), unsafe_allow_html=True)
     with score_col:
         st.write(entry["reason"])
+        if entry.get("trend") == "reversing":
+            st.warning(
+                f"5D flow ({entry.get('window_5d')}) and 20D flow ({entry.get('window_20d')}) disagree — "
+                "the verdict above is the 20D read and may be lagging a more recent reversal.",
+                icon="⚠️",
+            )
 
     st.markdown("#### Score breakdown")
-    st.dataframe(_component_breakdown(entry), use_container_width=True, hide_index=True)
+    st.caption("Every row shows exactly what date range it covers — nothing here is a single unlabeled number.")
+    st.dataframe(_component_breakdown(entry, frame), use_container_width=True, hide_index=True)
 
     if frame is None or frame.empty:
         st.info("No price/volume history available for this asset.")

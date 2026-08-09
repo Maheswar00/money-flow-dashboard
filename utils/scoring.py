@@ -53,6 +53,31 @@ def _verdict(score: float) -> str:
     return "Neutral"
 
 
+def window_label(index, window: int):
+    """'Aug 1-7' style label for the trailing N-bar window - so a score is
+    never shown without saying exactly what dates it covers. Builds the
+    non-zero-padded day manually (rather than %-d/%#d) since that strftime
+    flag isn't portable between Windows and Unix."""
+    if index is None or len(index) < window:
+        return None
+    start, end = index[-window], index[-1]
+    if start.year == end.year and start.month == end.month:
+        return f"{start.strftime('%b')} {start.day}–{end.day}"
+    return f"{start.strftime('%b')} {start.day}–{end.strftime('%b')} {end.day}"
+
+
+def _trend_state(ratio_5d, ratio_20d) -> str:
+    """The 20D flow ratio can stay negative for weeks after a heavy-volume
+    selloff even once buying has resumed, because the old selloff volume is
+    still inside the window. Comparing against the most recent 5 days catches
+    that lag instead of silently showing a stale verdict."""
+    if pd.isna(ratio_5d) or pd.isna(ratio_20d):
+        return "insufficient"
+    if (ratio_5d > 0.1 and ratio_20d < -0.1) or (ratio_5d < -0.1 and ratio_20d > 0.1):
+        return "reversing"
+    return "confirming"
+
+
 def cmf_label(cmf: float) -> str:
     """Shared plain-English CMF read, used consistently by the Overview/Evidence
     reason text and the Watchlist scanner - one vocabulary everywhere instead
@@ -66,7 +91,7 @@ def cmf_label(cmf: float) -> str:
     return "Neutral"
 
 
-def _reason(cmf, ratio_20d, mfi, cot_component) -> str:
+def _reason(cmf, ratio_20d, mfi, cot_component, ratio_5d=None, trend=None) -> str:
     parts = []
     if pd.notna(cmf):
         if cmf > 0.05:
@@ -87,8 +112,15 @@ def _reason(cmf, ratio_20d, mfi, cot_component) -> str:
         parts.append("MFI is stretched, watch for a reversal")
 
     if not parts:
-        return "No strong signal either way right now."
-    return parts[0].capitalize() + (("; " + parts[1]) if len(parts) > 1 else "") + "."
+        base = "No strong signal either way right now."
+    else:
+        base = parts[0].capitalize() + (("; " + parts[1]) if len(parts) > 1 else "") + "."
+
+    if trend == "reversing" and pd.notna(ratio_5d):
+        direction = "buying" if ratio_5d > 0 else "selling"
+        base += f" But the last 5 days have flipped to net {direction} — this read may be lagging."
+
+    return base
 
 
 def compute_asset_scores(flow_data: dict, cot_df: pd.DataFrame) -> list:
@@ -108,7 +140,9 @@ def compute_asset_scores(flow_data: dict, cot_df: pd.DataFrame) -> list:
         cmf = chaikin_money_flow(high, low, close, volume).iloc[-1]
         mfi = money_flow_index(high, low, close, volume).iloc[-1]
         _, ratio_20d = net_flow_ratio(close, volume, 20)
+        _, ratio_5d = net_flow_ratio(close, volume, 5) if len(frame) >= 6 else (np.nan, np.nan)
         cot_component = _cot_component(cot_table, label)
+        trend = _trend_state(ratio_5d, ratio_20d)
 
         components = {
             "cmf": (cmf, _WEIGHTS["cmf"]),
@@ -130,10 +164,14 @@ def compute_asset_scores(flow_data: dict, cot_df: pd.DataFrame) -> list:
             "label": label,
             "score": score,
             "verdict": _verdict(score) if pd.notna(score) else "Unavailable",
-            "reason": _reason(cmf, ratio_20d, mfi, cot_component) if pd.notna(score) else "Not enough data.",
+            "reason": _reason(cmf, ratio_20d, mfi, cot_component, ratio_5d, trend) if pd.notna(score) else "Not enough data.",
             "cmf": cmf,
             "mfi": mfi,
             "flow_ratio_20d": ratio_20d,
+            "flow_ratio_5d": ratio_5d,
+            "trend": trend,
+            "window_5d": window_label(close.index, 5),
+            "window_20d": window_label(close.index, 20),
             "cot_component": cot_component,
             "has_cot": label in COT_MATCH,
             "last_close": close.iloc[-1],

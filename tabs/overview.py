@@ -24,7 +24,12 @@ def _render_scorecard(scores: list):
         for col, entry in zip(cols, row):
             with col:
                 st.markdown(
-                    flow_card_html(entry["label"], entry["verdict"], entry["score"], entry["reason"]),
+                    flow_card_html(
+                        entry["label"], entry["verdict"], entry["score"], entry["reason"],
+                        flow_ratio_5d=entry.get("flow_ratio_5d"), window_5d=entry.get("window_5d"),
+                        flow_ratio_20d=entry.get("flow_ratio_20d"), window_20d=entry.get("window_20d"),
+                        trend=entry.get("trend"),
+                    ),
                     unsafe_allow_html=True,
                 )
 

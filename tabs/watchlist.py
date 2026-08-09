@@ -111,13 +111,15 @@ def _color_signed(v):
 def render():
     st.subheader("Watchlist")
     st.caption(
-        "Type any tickers to get the same composite money-flow signal used on Overview/Evidence, applied to any asset — "
-        "not just the curated 7. Ranked by conviction (largest |score| first)."
+        "Compare bullish vs. bearish across asset classes — same composite money-flow signal used on Overview/Evidence, "
+        "but you pick the tickers instead of the curated 7. Swap in whatever asset-class proxies you want to track. "
+        "Ranked by conviction (largest |score| first)."
     )
 
     tickers_input = st.text_input(
-        "Tickers (comma separated):",
-        value="AAPL, MSFT, NVDA, TSLA, ^GSPC, GLD, BTC-USD",
+        "Tickers (comma separated) — asset-class proxies, not individual stocks:",
+        value="SPY, QQQ, GLD, SLV, USO, UUP, TLT, BTC-USD, ETH-USD",
+        help="e.g. SPY=US equities, QQQ=tech equities, GLD=gold, SLV=silver, USO=oil, UUP=US dollar, TLT=long bonds, BTC/ETH-USD=crypto. Type your own to compare different asset classes.",
         key="watchlist_tickers",
     )
     tickers = parse_tickers(tickers_input)

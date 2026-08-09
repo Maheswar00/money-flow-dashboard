@@ -3,6 +3,14 @@ import streamlit as st
 def render():
     st.subheader("📘 Capital Flow Playbook — How Smart Money Rotates")
 
+    st.markdown("""
+**Where this shows up in the dashboard:** #2 (Relative Strength) and #3 (Volume + Price) feed
+the **Overview** verdict scores directly. #5 (Sector Rotation) and #6 (Macro/Liquidity) are on
+**Overview**. #7 (Positioning) is the COT chart on **Evidence**. #8 (Bitcoin Dominance) is on
+**Evidence** for Bitcoin/Ethereum. #4 (ETF Flows) is approximated via dollar-volume flow, not
+real creation/redemption data — true flow data needs a paid vendor (ETF.com/Lipper/EPFR).
+""")
+
     with st.expander("Open Playbook", expanded=True):
         st.markdown("""
 ## 1️⃣ Inter‑Market Analysis (Top‑Down View)

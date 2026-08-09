@@ -13,17 +13,6 @@ def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def pct_return(series: pd.Series, periods: int) -> float:
-    if len(series) < periods + 1:
-        return np.nan
-    return (series.iloc[-1] / series.iloc[-periods - 1] - 1) * 100
-
-def multi_period_returns(df: pd.DataFrame, periods_map: dict) -> pd.DataFrame:
-    out = {}
-    for label, periods in periods_map.items():
-        out[label] = df.pct_change(periods=periods).iloc[-1] * 100
-    return pd.DataFrame(out)
-
 def dollar_volume(close: pd.Series, volume: pd.Series) -> pd.Series:
     """Price x volume - the correct unit for comparing flow across assets
     with very different share prices and share counts (e.g. BTC-USD vs GLD vs ^GSPC)."""
@@ -65,21 +54,17 @@ def on_balance_volume(close: pd.Series, volume: pd.Series) -> pd.Series:
     return (direction * volume).cumsum()
 
 
-def volume_price_signal(price: pd.Series, volume: pd.Series, window: int = 20) -> str:
-    if len(price) < window + 1 or len(volume) < window + 1:
-        return "Insufficient data"
+def net_flow_ratio(close: pd.Series, volume: pd.Series, window: int) -> tuple:
+    """Net signed dollar volume over the trailing window (each day's dollar
+    volume added if price closed up, subtracted if down), plus that net flow
+    as a fraction of total dollar volume traded - bounded [-1, 1], so it's
+    comparable across assets regardless of price/size. Returns
+    (net_dollar_flow, ratio)."""
+    dv = dollar_volume(close, volume)
+    direction = np.sign(close.diff().fillna(0))
+    signed = (direction * dv).tail(window)
+    total = dv.tail(window).sum()
 
-    price_change = price.iloc[-1] / price.iloc[-window - 1] - 1
-    vol_ma = volume.rolling(window).mean()
-    vol_change = volume.iloc[-1] / vol_ma.iloc[-1] - 1 if vol_ma.iloc[-1] != 0 else 0
-
-    if price_change > 0 and vol_change > 0:
-        return "Strong Accumulation (Price ↑, Volume ↑)"
-    elif price_change > 0 and vol_change <= 0:
-        return "Weak Rally (Price ↑, Volume ↓/flat)"
-    elif price_change < 0 and vol_change > 0:
-        return "Distribution (Price ↓, Volume ↑)"
-    elif price_change < 0 and vol_change <= 0:
-        return "Weak Selling (Price ↓, Volume ↓/flat)"
-    else:
-        return "Sideways / No clear signal"
+    net_flow = signed.sum()
+    ratio = net_flow / total if total else np.nan
+    return net_flow, ratio

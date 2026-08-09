@@ -171,8 +171,9 @@ FLOW_PROXIES = {
 
 @st.cache_data(ttl=3600)
 def load_flow_universe(period: str = "6mo"):
-    """Close + Volume (not just Close) for the FLOW_PROXIES tickers, one batched
-    download - needed for the dollar-volume flow proxy in tabs/flows.py."""
+    """High/Low/Close/Volume (full OHLCV, not just Close) for the FLOW_PROXIES
+    tickers, one batched download - needed for CMF/MFI and the dollar-volume
+    flow proxy used by utils/scoring.py."""
     tickers = list(FLOW_PROXIES.values())
     try:
         df = yf.download(tickers, period=period, interval="1d", progress=False)
@@ -184,19 +185,21 @@ def load_flow_universe(period: str = "6mo"):
     for label, ticker in FLOW_PROXIES.items():
         try:
             if isinstance(df.columns, pd.MultiIndex):
+                high, low = df["High"][ticker], df["Low"][ticker]
                 close, volume = df["Close"][ticker], df["Volume"][ticker]
             else:
+                high, low = df["High"], df["Low"]
                 close, volume = df["Close"], df["Volume"]
         except KeyError:
             continue
 
-        frame = pd.concat([close, volume], axis=1)
-        frame.columns = ["Close", "Volume"]
+        frame = pd.concat([high, low, close, volume], axis=1)
+        frame.columns = ["High", "Low", "Close", "Volume"]
         frame = frame.dropna()
         if not frame.empty:
             out[label] = frame
         else:
-            print(f"❌ No valid Close/Volume data for {label} ({ticker})")
+            print(f"❌ No valid OHLCV data for {label} ({ticker})")
 
     return out
 

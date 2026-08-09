@@ -16,7 +16,7 @@ def _build_return_matrix(prices: pd.DataFrame) -> pd.DataFrame:
         out[label] = prices.pct_change(periods=periods).iloc[-1] * 100
     return pd.DataFrame(out)
 
-def render(assets, prices: pd.DataFrame):
+def render(assets, prices: pd.DataFrame, sector_assets=None, sector_prices: pd.DataFrame = None):
     st.subheader("🔥 Heatmaps & Rotation")
 
     if prices is None or prices.empty:
@@ -57,4 +57,26 @@ def render(assets, prices: pd.DataFrame):
 **Use case:**
 - Look for clusters of green → capital concentrating.
 - Watch for assets flipping from red to green across horizons → early rotation.
+""")
+
+    if sector_prices is not None and not sector_prices.empty:
+        st.markdown("### 🏭 Sector Rotation (Inside Equities)")
+        st.caption("Money can stay in stocks and still rotate — this tracks where within the S&P 500 it's going.")
+
+        sector_returns = _build_return_matrix(sector_prices).round(2)
+
+        fig_sector = px.imshow(
+            sector_returns,
+            text_auto=True,
+            color_continuous_scale="RdYlGn",
+            aspect="auto",
+            labels=dict(x="Period", y="Sector", color="% Return"),
+        )
+        st.plotly_chart(fig_sector, use_container_width=True, key="heatmap_sectors")
+
+        st.markdown("""
+**Typical rotation sequence (early cycle → late cycle):**
+Defensive (Staples, Utilities) → Cyclical (Industrials, Financials) → Growth (Tech, Comm. Services) → Speculative
+
+Sectors lighting up green ahead of the broader market often signal where institutional flow is rotating *before* it shows up in the headline indexes.
 """)

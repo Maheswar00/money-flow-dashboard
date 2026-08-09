@@ -6,7 +6,12 @@ from utils.data_loader import (
     load_intraday_volume_data,
     load_price_history,
     load_macro_universe,
+    load_sector_universe,
+    load_flow_universe,
 )
+from utils.cot_loader import load_cot_positioning
+from utils.fred_loader import load_fred_series
+from utils.crypto_loader import load_crypto_dominance
 from utils.theming import set_page_config_and_theme
 
 from tabs import intraday, comparison, macro, heatmaps, flows, signals, playbook
@@ -101,6 +106,11 @@ price_history = load_price_history(
 )
 
 macro_assets, macro_prices = load_macro_universe()
+sector_assets, sector_prices = load_sector_universe()
+flow_data = load_flow_universe()
+cot_df = load_cot_positioning()
+fred_df = load_fred_series()
+crypto_dominance = load_crypto_dominance()
 
 # ---------------------------------------------------------
 # TABS
@@ -146,16 +156,22 @@ with tab_macro:
         assets=macro_assets,
         prices=macro_prices,
         momentum_window=momentum_window,
+        fred_df=fred_df,
     )
 
 with tab_heatmaps:
     heatmaps.render(
         assets=macro_assets,
         prices=macro_prices,
+        sector_assets=sector_assets,
+        sector_prices=sector_prices,
     )
 
 with tab_flows:
-    flows.render()
+    flows.render(
+        flow_data=flow_data,
+        crypto_dominance=crypto_dominance,
+    )
 
 with tab_signals:
     signals.render(
@@ -163,6 +179,7 @@ with tab_signals:
         price_history=price_history,
         intraday_df=intraday_df,
         macro_prices=macro_prices,
+        cot_df=cot_df,
     )
 
 with tab_playbook:

@@ -68,11 +68,68 @@ def _extract_close_column(df, ticker):
     return None
 
 
+def _load_universe(assets: dict, fallback: dict = None, period: str = "1y") -> pd.DataFrame:
+    """Batch-download Close prices for a labeled set of tickers, with an optional
+    batched fallback pass for whichever ones fail. Shared by load_macro_universe()
+    and load_sector_universe() - one or two network round-trips total, never one
+    request per asset."""
+    fallback = fallback or {}
+    clean = {}
+
+    primary_tickers = list(assets.values())
+    try:
+        primary_df = yf.download(primary_tickers, period=period, interval="1d", progress=False)
+    except Exception as e:
+        print(f"⚠ Error batch-fetching primary tickers: {e}")
+        primary_df = pd.DataFrame()
+
+    missing = {}
+    for label, ticker in assets.items():
+        series = _extract_close_column(primary_df, ticker)
+        s = series.dropna() if isinstance(series, pd.Series) else None
+        if s is not None and not s.empty:
+            clean[label] = s
+        else:
+            missing[label] = ticker
+
+    fallback_needed = {
+        label: fallback[label] for label in missing if label in fallback
+    }
+    if fallback_needed:
+        fallback_tickers = list(fallback_needed.values())
+        try:
+            fallback_df = yf.download(fallback_tickers, period=period, interval="1d", progress=False)
+        except Exception as e:
+            print(f"⚠ Error batch-fetching fallback tickers: {e}")
+            fallback_df = pd.DataFrame()
+
+        for label, alt in fallback_needed.items():
+            series = _extract_close_column(fallback_df, alt)
+            s = series.dropna() if isinstance(series, pd.Series) else None
+            if s is not None and not s.empty:
+                clean[label] = s
+                print(f"✅ Using fallback for {label}: {alt}")
+            else:
+                print(f"❌ No valid data for {label} (primary {assets[label]}, fallback {alt})")
+
+    for label in missing:
+        if label not in fallback:
+            print(f"❌ No valid data for {label} ({assets[label]}), no fallback configured")
+
+    if not clean:
+        return pd.DataFrame()
+
+    prices = pd.DataFrame(clean).dropna(how="all")
+    # Crypto trades 24/7; equities/commodities/bonds/FX don't. On a weekend or
+    # holiday, that leaves the most recent row(s) NaN for every non-crypto column,
+    # which silently breaks every .iloc[-1]-based return/momentum calculation
+    # downstream (heatmaps, momentum ranking, etc). Forward-fill carries the last
+    # real close forward, same as a human reading "current price" over a weekend.
+    return prices.ffill()
+
+
 @st.cache_data(ttl=3600)
 def load_macro_universe():
-    # -----------------------------
-    # Asset universe
-    # -----------------------------
     assets = {
         "S&P 500": "^GSPC",
         "Nasdaq": "^IXIC",
@@ -93,64 +150,74 @@ def load_macro_universe():
         "US Dollar Index": "UUP",
     }
 
-    clean = {}
+    prices = _load_universe(assets, fallback)
+    return assets, prices
 
-    # -----------------------------
-    # One batched request for every primary ticker, instead of
-    # a separate network round-trip per asset.
-    # -----------------------------
-    primary_tickers = list(assets.values())
+
+# Tradable ETF/spot proxies for each broad asset class - deliberately NOT the
+# index tickers (^GSPC, ^IXIC): those aren't directly traded, so Yahoo's Volume
+# figure for them can't be turned into a real dollar-flow number (see
+# tabs/intraday.py's _is_index_ticker for the same issue elsewhere).
+FLOW_PROXIES = {
+    "US Equities (SPY)": "SPY",
+    "Nasdaq Equities (QQQ)": "QQQ",
+    "Gold (GLD)": "GLD",
+    "Oil (USO)": "USO",
+    "Bonds (TLT)": "TLT",
+    "Bitcoin": "BTC-USD",
+    "Ethereum": "ETH-USD",
+}
+
+
+@st.cache_data(ttl=3600)
+def load_flow_universe(period: str = "6mo"):
+    """Close + Volume (not just Close) for the FLOW_PROXIES tickers, one batched
+    download - needed for the dollar-volume flow proxy in tabs/flows.py."""
+    tickers = list(FLOW_PROXIES.values())
     try:
-        primary_df = yf.download(primary_tickers, period="1y", interval="1d", progress=False)
+        df = yf.download(tickers, period=period, interval="1d", progress=False)
     except Exception as e:
-        print(f"⚠ Error batch-fetching primary tickers: {e}")
-        primary_df = pd.DataFrame()
+        print(f"⚠ Error batch-fetching flow-proxy tickers: {e}")
+        return {}
 
-    missing = {}
-    for label, ticker in assets.items():
-        series = _extract_close_column(primary_df, ticker)
-        if isinstance(series, pd.Series):
-            s = series.dropna()
-        else:
-            s = None
-
-        if s is not None and not s.empty:
-            clean[label] = s
-        else:
-            missing[label] = ticker
-
-    # -----------------------------
-    # Second batched request covering only the tickers that need
-    # a fallback (usually zero, occasionally one or two) - never
-    # one request per asset.
-    # -----------------------------
-    fallback_needed = {
-        label: fallback[label] for label in missing if label in fallback
-    }
-    if fallback_needed:
-        fallback_tickers = list(fallback_needed.values())
+    out = {}
+    for label, ticker in FLOW_PROXIES.items():
         try:
-            fallback_df = yf.download(fallback_tickers, period="1y", interval="1d", progress=False)
-        except Exception as e:
-            print(f"⚠ Error batch-fetching fallback tickers: {e}")
-            fallback_df = pd.DataFrame()
-
-        for label, alt in fallback_needed.items():
-            series = _extract_close_column(fallback_df, alt)
-            s = series.dropna() if isinstance(series, pd.Series) else None
-            if s is not None and not s.empty:
-                clean[label] = s
-                print(f"✅ Using fallback for {label}: {alt}")
+            if isinstance(df.columns, pd.MultiIndex):
+                close, volume = df["Close"][ticker], df["Volume"][ticker]
             else:
-                print(f"❌ No valid data for {label} (primary {assets[label]}, fallback {alt})")
+                close, volume = df["Close"], df["Volume"]
+        except KeyError:
+            continue
 
-    for label in missing:
-        if label not in fallback:
-            print(f"❌ No valid data for {label} ({assets[label]}), no fallback configured")
+        frame = pd.concat([close, volume], axis=1)
+        frame.columns = ["Close", "Volume"]
+        frame = frame.dropna()
+        if not frame.empty:
+            out[label] = frame
+        else:
+            print(f"❌ No valid Close/Volume data for {label} ({ticker})")
 
-    if not clean:
-        return assets, pd.DataFrame()
+    return out
 
-    prices = pd.DataFrame(clean).dropna(how="all")
 
+@st.cache_data(ttl=3600)
+def load_sector_universe():
+    """S&P 500 sector SPDR ETFs, for tracking rotation *within* equities
+    (playbook point #5), not just across broad asset classes."""
+    assets = {
+        "Technology": "XLK",
+        "Financials": "XLF",
+        "Energy": "XLE",
+        "Health Care": "XLV",
+        "Consumer Discretionary": "XLY",
+        "Consumer Staples": "XLP",
+        "Industrials": "XLI",
+        "Materials": "XLB",
+        "Utilities": "XLU",
+        "Real Estate": "XLRE",
+        "Communication Services": "XLC",
+    }
+
+    prices = _load_universe(assets)
     return assets, prices

@@ -3,7 +3,15 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-from utils.indicators import volume_price_signal
+from utils.indicators import volume_price_signal, dollar_volume
+
+
+def _is_index_ticker(ticker: str) -> bool:
+    """Index tickers (^GSPC, ^IXIC, ...) aren't directly traded - Yahoo's "Volume"
+    for them is a composite figure, not shares actually changing hands, so price x
+    volume doesn't produce a real dollar-flow number for these."""
+    return ticker.startswith("^")
+
 
 def _build_volume_scanner_table(tickers, avg_vol, intraday_df):
     rows = []
@@ -27,12 +35,20 @@ def _build_volume_scanner_table(tickers, avg_vol, intraday_df):
             avg = avg_vol.get(t, np.nan)
 
             pct = (cum_vol / avg * 100) if avg and avg > 0 else np.nan
+            # $ Volume lets you compare magnitude *across* tickers fairly (share
+            # counts alone don't - a "share" of BTC-USD and a share of GLD aren't
+            # the same unit of capital). % of Avg Volume is still the ranking basis
+            # since it's already self-normalized per ticker. Skip $ figures for
+            # index tickers - see _is_index_ticker().
+            is_index = _is_index_ticker(t)
+            dollar_vol = np.nan if is_index else dollar_volume(price, vol).iloc[-1]
+            avg_dollar_vol = np.nan if is_index or not avg or avg <= 0 else avg * last_price
 
             rows.append({
                 "Ticker": t,
                 "Last Price": last_price,
-                "Cumulative Volume": int(cum_vol),
-                "Avg Daily Volume": int(avg) if not np.isnan(avg) else np.nan,
+                "$ Volume": dollar_vol,
+                "~Avg Daily $ Volume": avg_dollar_vol,
                 "% of Avg Volume": pct,
                 "Signal": volume_price_signal(price, vol, window=20),
             })
@@ -46,12 +62,15 @@ def _build_volume_scanner_table(tickers, avg_vol, intraday_df):
             last_price = price.iloc[-1]
             avg = avg_vol.iloc[0]
             pct = (cum_vol / avg * 100) if avg > 0 else np.nan
+            is_index = _is_index_ticker(t)
+            dollar_vol = np.nan if is_index else dollar_volume(price, vol).iloc[-1]
+            avg_dollar_vol = np.nan if is_index or avg <= 0 else avg * last_price
 
             rows.append({
                 "Ticker": t,
                 "Last Price": last_price,
-                "Cumulative Volume": int(cum_vol),
-                "Avg Daily Volume": int(avg),
+                "$ Volume": dollar_vol,
+                "~Avg Daily $ Volume": avg_dollar_vol,
                 "% of Avg Volume": pct,
                 "Signal": volume_price_signal(price, vol, window=20),
             })
@@ -70,14 +89,23 @@ def render(tickers, avg_vol, intraday_df, price_history, timeframe_label):
     if table.empty:
         st.warning("No intraday data. Market might be closed or tickers invalid.")
     else:
+        # Pre-format $ columns to strings (incl. the "—" for index tickers) instead
+        # of relying on Styler - st.dataframe's Arrow-based renderer shows NaN as
+        # the literal text "None" regardless of Styler's na_rep.
+        display_table = table.copy()
+        for col in ["$ Volume", "~Avg Daily $ Volume"]:
+            display_table[col] = table[col].apply(lambda v: "—" if pd.isna(v) else f"${v:,.0f}")
+
         st.dataframe(
-            table.style.format({
+            display_table.style.format({
                 "Last Price": "{:.2f}",
                 "% of Avg Volume": "{:.1f}",
-                "Cumulative Volume": "{:,}",
-                "Avg Daily Volume": "{:,}",
             }),
             use_container_width=True,
+        )
+        st.caption(
+            "$ Volume = price x volume, the fair unit for comparing capital traded across tickers with very different prices/share counts. "
+            "Shown as — for index tickers (^GSPC, ^IXIC, ...) - they aren't directly traded, so Yahoo's volume figure for them isn't a real dollar-flow number."
         )
 
     st.markdown("### 📈 Multi‑Ticker Intraday Price Comparison")

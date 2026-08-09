@@ -123,6 +123,57 @@ def _reason(cmf, ratio_20d, mfi, cot_component, ratio_5d=None, trend=None) -> st
     return base
 
 
+def _score_frame(label: str, frame: pd.DataFrame, cot_component, has_cot: bool):
+    """Core composite-scoring math for one asset's OHLCV frame. Shared by
+    compute_asset_scores() (the curated 7 asset-class proxies, with CFTC
+    positioning) and score_ticker() (any user-entered ticker on the
+    Watchlist, no CFTC coverage) - one signal vocabulary for the whole app
+    instead of two implementations that could drift apart."""
+    if frame is None or len(frame) < 21:
+        return None
+
+    high, low, close, volume = frame["High"], frame["Low"], frame["Close"], frame["Volume"]
+
+    cmf = chaikin_money_flow(high, low, close, volume).iloc[-1]
+    mfi = money_flow_index(high, low, close, volume).iloc[-1]
+    _, ratio_20d = net_flow_ratio(close, volume, 20)
+    _, ratio_5d = net_flow_ratio(close, volume, 5) if len(frame) >= 6 else (np.nan, np.nan)
+    trend = _trend_state(ratio_5d, ratio_20d)
+
+    components = {
+        "cmf": (cmf, _WEIGHTS["cmf"]),
+        "flow_ratio": (ratio_20d, _WEIGHTS["flow_ratio"]),
+        "mfi": ((mfi - 50) / 50 if pd.notna(mfi) else np.nan, _WEIGHTS["mfi"]),
+        "cot": (cot_component, _WEIGHTS["cot"]),
+    }
+
+    weighted_sum, weight_total = 0.0, 0.0
+    for value, weight in components.values():
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            continue
+        weighted_sum += value * weight
+        weight_total += weight
+
+    score = weighted_sum / weight_total if weight_total > 0 else np.nan
+
+    return {
+        "label": label,
+        "score": score,
+        "verdict": _verdict(score) if pd.notna(score) else "Unavailable",
+        "reason": _reason(cmf, ratio_20d, mfi, cot_component, ratio_5d, trend) if pd.notna(score) else "Not enough data.",
+        "cmf": cmf,
+        "mfi": mfi,
+        "flow_ratio_20d": ratio_20d,
+        "flow_ratio_5d": ratio_5d,
+        "trend": trend,
+        "window_5d": window_label(close.index, 5),
+        "window_20d": window_label(close.index, 20),
+        "cot_component": cot_component,
+        "has_cot": has_cot,
+        "last_close": close.iloc[-1],
+    }
+
+
 def compute_asset_scores(flow_data: dict, cot_df: pd.DataFrame) -> list:
     """One entry per FLOW_PROXIES asset: verdict (Inflow/Outflow/Neutral),
     composite score, the raw component values (for the Evidence tab), and a
@@ -132,49 +183,18 @@ def compute_asset_scores(flow_data: dict, cot_df: pd.DataFrame) -> list:
 
     results = []
     for label, frame in (flow_data or {}).items():
-        if frame is None or len(frame) < 21:
-            continue
-
-        high, low, close, volume = frame["High"], frame["Low"], frame["Close"], frame["Volume"]
-
-        cmf = chaikin_money_flow(high, low, close, volume).iloc[-1]
-        mfi = money_flow_index(high, low, close, volume).iloc[-1]
-        _, ratio_20d = net_flow_ratio(close, volume, 20)
-        _, ratio_5d = net_flow_ratio(close, volume, 5) if len(frame) >= 6 else (np.nan, np.nan)
         cot_component = _cot_component(cot_table, label)
-        trend = _trend_state(ratio_5d, ratio_20d)
-
-        components = {
-            "cmf": (cmf, _WEIGHTS["cmf"]),
-            "flow_ratio": (ratio_20d, _WEIGHTS["flow_ratio"]),
-            "mfi": ((mfi - 50) / 50 if pd.notna(mfi) else np.nan, _WEIGHTS["mfi"]),
-            "cot": (cot_component, _WEIGHTS["cot"]),
-        }
-
-        weighted_sum, weight_total = 0.0, 0.0
-        for value, weight in components.values():
-            if value is None or (isinstance(value, float) and np.isnan(value)):
-                continue
-            weighted_sum += value * weight
-            weight_total += weight
-
-        score = weighted_sum / weight_total if weight_total > 0 else np.nan
-
-        results.append({
-            "label": label,
-            "score": score,
-            "verdict": _verdict(score) if pd.notna(score) else "Unavailable",
-            "reason": _reason(cmf, ratio_20d, mfi, cot_component, ratio_5d, trend) if pd.notna(score) else "Not enough data.",
-            "cmf": cmf,
-            "mfi": mfi,
-            "flow_ratio_20d": ratio_20d,
-            "flow_ratio_5d": ratio_5d,
-            "trend": trend,
-            "window_5d": window_label(close.index, 5),
-            "window_20d": window_label(close.index, 20),
-            "cot_component": cot_component,
-            "has_cot": label in COT_MATCH,
-            "last_close": close.iloc[-1],
-        })
+        entry = _score_frame(label, frame, cot_component, has_cot=label in COT_MATCH)
+        if entry is not None:
+            results.append(entry)
 
     return results
+
+
+def score_ticker(ticker: str, frame: pd.DataFrame):
+    """Same composite scoring as compute_asset_scores(), for any single
+    user-entered ticker (Watchlist tab). No CFTC futures market exists for
+    most tickers, so the CFTC component is always excluded and the other
+    weights renormalize - same rule as Ethereum in the curated scorecard.
+    Returns None if there's not enough price history (needs 21+ daily bars)."""
+    return _score_frame(ticker, frame, cot_component=None, has_cot=False)

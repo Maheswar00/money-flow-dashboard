@@ -3,9 +3,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from utils.data_loader import parse_tickers, load_intraday_volume_data, load_price_data
-from utils.indicators import dollar_volume, chaikin_money_flow, compute_rsi
-from utils.scoring import cmf_label
+from utils.data_loader import parse_tickers, load_price_data, get_ticker_names
+from utils.indicators import display_dollar_volume, chaikin_money_flow, compute_rsi
+from utils.scoring import score_ticker
+from utils.theming import verdict_badge_html
 
 RATIO_PAIRS = {
     "BTC / S&P 500": ("BTC-USD", "^GSPC"),
@@ -15,13 +16,7 @@ RATIO_PAIRS = {
     "ETH / BTC": ("ETH-USD", "BTC-USD"),
 }
 
-TIMEFRAMES = {
-    "1 Day": ("1d", "5m"),
-    "5 Days": ("5d", "15m"),
-    "1 Month": ("1mo", "30m"),
-    "3 Months": ("3mo", "1h"),
-    "1 Year": ("1y", "1d"),
-}
+_VERDICT_COLOR = {"Inflow": "#0ca30c", "Outflow": "#d03b3b", "Neutral": "#898781", "Unavailable": "#898781"}
 
 
 def _is_index_ticker(ticker: str) -> bool:
@@ -65,130 +60,137 @@ def _get_ohlcv(price_history, ticker: str):
     return frame if not frame.empty else None
 
 
-def _build_scanner_table(tickers, avg_vol, intraday_df):
+def _build_signal_table(tickers, price_history, names):
+    """One row per ticker: price/volume context plus the same composite
+    money-flow verdict used on Overview/Evidence (utils.scoring.score_ticker) -
+    real signal confluence (CMF + dollar-flow direction + MFI, CFTC
+    positioning where available), not a single indicator's sign."""
     rows = []
-    if intraday_df is None or intraday_df.empty:
-        return pd.DataFrame()
-
-    multi = isinstance(intraday_df.columns, pd.MultiIndex)
-    ticker_list = tickers if multi else tickers[:1]
-
-    for t in ticker_list:
-        try:
-            if multi:
-                high, low = intraday_df["High", t].dropna(), intraday_df["Low", t].dropna()
-                close, vol = intraday_df["Close", t].dropna(), intraday_df["Volume", t].dropna()
-            else:
-                high, low = intraday_df["High"].dropna(), intraday_df["Low"].dropna()
-                close, vol = intraday_df["Close"].dropna(), intraday_df["Volume"].dropna()
-        except KeyError:
-            continue
-        if close.empty or vol.empty:
+    for t in tickers:
+        frame = _get_ohlcv(price_history, t)
+        entry = score_ticker(t, frame)
+        if entry is None:
             continue
 
-        last_price = close.iloc[-1]
-        cum_vol = vol.iloc[-1]
-        avg = avg_vol.get(t, np.nan) if multi else avg_vol.iloc[0]
-        pct = (cum_vol / avg * 100) if avg and avg > 0 else np.nan
-
-        is_index = _is_index_ticker(t)
-        dv = np.nan if is_index else dollar_volume(close, vol).iloc[-1]
-
-        cmf = np.nan
-        if len(close) >= 21:
-            joined = pd.concat([high, low, close, vol], axis=1).dropna()
-            joined.columns = ["High", "Low", "Close", "Volume"]
-            if len(joined) >= 21:
-                cmf = chaikin_money_flow(joined["High"], joined["Low"], joined["Close"], joined["Volume"]).iloc[-1]
+        close, volume = frame["Close"], frame["Volume"]
+        day_chg = (close.iloc[-1] / close.iloc[-2] - 1) * 100 if len(close) >= 2 else np.nan
+        vol_avg20 = volume.tail(20).mean()
+        rel_vol = (volume.iloc[-1] / vol_avg20 * 100) if vol_avg20 and vol_avg20 > 0 else np.nan
+        rsi = compute_rsi(close).iloc[-1]
+        dv = np.nan if _is_index_ticker(t) else display_dollar_volume(t, close, volume).iloc[-1]
 
         rows.append({
             "Ticker": t,
-            "Last Price": last_price,
-            "$ Volume": dv,
-            "% of Avg Volume": pct,
-            "Signal": cmf_label(cmf),
+            "Name": names.get(t, t),
+            "Last Price": close.iloc[-1],
+            "Day %": day_chg,
+            "$ Volume": "—" if pd.isna(dv) else f"${dv:,.0f}",
+            "Rel. Volume": "—" if pd.isna(rel_vol) else f"{rel_vol:.0f}%",
+            "RSI (14)": rsi,
+            "Verdict": entry["verdict"],
+            "Score": entry["score"],
+            "Reason": entry["reason"],
         })
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values("% of Avg Volume", ascending=False)
+    df = pd.DataFrame(rows)
+    return df.reindex(df["Score"].abs().sort_values(ascending=False).index)
+
+
+def _color_verdict(v):
+    return f"color:{_VERDICT_COLOR.get(v, '#898781')}; font-weight:700"
+
+
+def _color_signed(v):
+    if pd.isna(v):
+        return ""
+    return "color:#0ca30c" if v > 0 else ("color:#d03b3b" if v < 0 else "")
 
 
 def render():
     st.subheader("Watchlist")
-    st.caption("Type any tickers to scan for unusual volume, compare prices, and check RSI — a general-purpose tool, separate from the curated Overview scorecard.")
+    st.caption(
+        "Type any tickers to get the same composite money-flow signal used on Overview/Evidence, applied to any asset — "
+        "not just the curated 7. Ranked by conviction (largest |score| first)."
+    )
 
-    c1, c2, c3 = st.columns([3, 1, 1])
-    with c1:
-        tickers_input = st.text_input(
-            "Tickers (comma separated):",
-            value="^GSPC, ^IXIC, GLD, USO, TLT, BTC-USD, ETH-USD",
-            key="watchlist_tickers",
-        )
-    with c2:
-        interval = st.selectbox("Intraday interval:", ["1m", "2m", "5m", "15m"], index=2, key="watchlist_interval")
-    with c3:
-        timeframe_label = st.selectbox("Chart timeframe:", list(TIMEFRAMES.keys()), index=0, key="watchlist_timeframe")
-
+    tickers_input = st.text_input(
+        "Tickers (comma separated):",
+        value="AAPL, MSFT, NVDA, TSLA, ^GSPC, GLD, BTC-USD",
+        key="watchlist_tickers",
+    )
     tickers = parse_tickers(tickers_input)
     if not tickers:
         st.error("Enter at least one valid ticker symbol.")
         return
 
-    period, chart_interval = TIMEFRAMES[timeframe_label]
-    avg_vol, intraday_df = load_intraday_volume_data(tickers=tickers, history_days=20, interval=interval)
-    price_history = load_price_data(tickers=tickers, period=period, interval=chart_interval)
+    price_history = load_price_data(tickers=tickers, period="6mo", interval="1d")
+    names = get_ticker_names(tuple(tickers))
 
-    st.markdown("#### Unusual Volume Scanner")
-    table = _build_scanner_table(tickers, avg_vol, intraday_df)
+    st.markdown("#### Signal Scanner")
+    table = _build_signal_table(tickers, price_history, names)
+
     if table.empty:
-        st.warning("No intraday data. Market might be closed or tickers invalid.")
+        st.warning("Not enough daily price history for these tickers yet (need 21+ trading days).")
     else:
-        st.dataframe(
-            table.style.format({
+        styled = (
+            table.style
+            .map(_color_verdict, subset=["Verdict"])
+            .map(_color_signed, subset=["Day %", "Score"])
+            .format({
                 "Last Price": "{:.2f}",
-                "% of Avg Volume": "{:.1f}",
-                "$ Volume": lambda v: "—" if pd.isna(v) else f"${v:,.0f}",
-            }),
-            use_container_width=True,
-            hide_index=True,
+                "Day %": "{:+.2f}%",
+                "RSI (14)": "{:.1f}",
+                "Score": "{:+.2f}",
+            })
         )
-        st.caption("$ Volume shown as — for index tickers (^GSPC, ^IXIC, ...) — they aren't directly traded, so Yahoo's volume figure for them isn't a real dollar-flow number.")
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.caption(
+            "Verdict blends Chaikin Money Flow, a 20-day dollar-flow ratio, and Money Flow Index (plus CFTC futures "
+            "positioning for the 6 assets that have it — see Evidence). $ Volume shown as — for index tickers "
+            "(^GSPC, ^IXIC, ...) since they aren't directly traded. Rel. Volume = today's volume ÷ its own 20-day average."
+        )
 
-    st.markdown("#### Price Comparison")
-    compare_tickers = st.multiselect("Select tickers:", tickers, default=[tickers[0]], key="watchlist_compare")
-    normalize = st.checkbox("Normalize to % change", value=len(compare_tickers) > 1, key="watchlist_normalize")
+    st.markdown("#### Inspect One Ticker")
+    detail_ticker = st.selectbox("Ticker:", tickers, key="watchlist_detail_ticker")
+    frame = _get_ohlcv(price_history, detail_ticker)
+    entry = score_ticker(detail_ticker, frame)
 
-    fig = go.Figure()
-    for t in compare_tickers:
-        series = _get_price_series(price_history, t)
-        if series is None or series.empty:
-            continue
-        y = (series / series.iloc[0] - 1) * 100 if normalize else series
-        fig.add_trace(go.Scatter(x=series.index, y=y, mode="lines", name=t, line=dict(width=2)))
-    fig.update_layout(
-        height=380, xaxis_title="Time", yaxis_title="% Change" if normalize else "Price",
-        hovermode="x unified", legend=dict(orientation="h", y=-0.2),
-    )
-    st.plotly_chart(fig, use_container_width=True, key="watchlist_price_chart")
+    if entry is None:
+        st.info("Not enough price history for this ticker.")
+    else:
+        badge_col, reason_col = st.columns([1, 3])
+        with badge_col:
+            st.markdown(verdict_badge_html(entry["verdict"]), unsafe_allow_html=True)
+        with reason_col:
+            st.write(entry["reason"])
 
-    col_rsi, col_ratio = st.columns(2)
-    with col_rsi:
-        st.markdown("#### RSI")
-        rsi_ticker = st.selectbox("Ticker:", tickers, key="watchlist_rsi_ticker")
-        series = _get_price_series(price_history, rsi_ticker)
-        if series is None or series.empty:
-            st.info("No price data for RSI.")
-        else:
-            rsi = compute_rsi(series, window=14)
+        close, volume = frame["Close"], frame["Volume"]
+        fig_price = go.Figure()
+        fig_price.add_trace(go.Scatter(x=close.index, y=close, name="Close", line=dict(width=2, color="#2a78d6")))
+        fig_price.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), yaxis_title="Price", hovermode="x unified")
+        st.plotly_chart(fig_price, use_container_width=True, key="watchlist_detail_price")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Chaikin Money Flow (20)**")
+            cmf_series = chaikin_money_flow(frame["High"], frame["Low"], close, volume)
+            fig_cmf = go.Figure()
+            fig_cmf.add_trace(go.Scatter(x=cmf_series.index, y=cmf_series, line=dict(width=2, color="#1baf7a")))
+            fig_cmf.add_hline(y=0, line_color="rgba(128,128,128,0.4)")
+            fig_cmf.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified")
+            st.plotly_chart(fig_cmf, use_container_width=True, key="watchlist_detail_cmf")
+        with c2:
+            st.markdown("**RSI (14)**")
+            rsi_series = compute_rsi(close, window=14)
             fig_rsi = go.Figure()
-            fig_rsi.add_trace(go.Scatter(x=rsi.index, y=rsi, mode="lines", name=f"RSI(14)"))
+            fig_rsi.add_trace(go.Scatter(x=rsi_series.index, y=rsi_series, line=dict(width=2, color="#eda100")))
             fig_rsi.add_hrect(y0=30, y1=70, fillcolor="gray", opacity=0.1, line_width=0)
-            fig_rsi.update_layout(height=280, hovermode="x unified", yaxis_range=[0, 100])
-            st.plotly_chart(fig_rsi, use_container_width=True, key="watchlist_rsi_chart")
+            fig_rsi.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0), yaxis_range=[0, 100], hovermode="x unified")
+            st.plotly_chart(fig_rsi, use_container_width=True, key="watchlist_detail_rsi")
 
-    with col_ratio:
-        st.markdown("#### Ratio Charts")
+    with st.expander("Ratio Charts (optional)"):
         ratio_label = st.selectbox("Ratio:", list(RATIO_PAIRS.keys()), key="watchlist_ratio")
         base, quote = RATIO_PAIRS[ratio_label]
         base_series = _get_price_series(price_history, base)

@@ -15,8 +15,27 @@ def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
 
 def dollar_volume(close: pd.Series, volume: pd.Series) -> pd.Series:
     """Price x volume - the correct unit for comparing flow across assets
-    with very different share prices and share counts (e.g. BTC-USD vs GLD vs ^GSPC)."""
+    with very different share prices and share counts (e.g. BTC-USD vs GLD vs ^GSPC).
+
+    NOTE: this assumes `volume` is share/coin-denominated, which is true for
+    stocks, ETFs, and commodities - but NOT for Yahoo Finance crypto pairs
+    (BTC-USD, ETH-USD, ...), whose "Volume" field is already reported in USD.
+    Multiplying it by price again inflates the result by ~the price itself
+    (verified live: BTC-USD's raw daily Volume is ~$12B, already a plausible
+    real dollar figure - not ~189,000 BTC coins). Ratio-based uses of this
+    function (net_flow_ratio, the composite score) are unaffected since that
+    same scaling error cancels out in a ratio - it only matters when the
+    result is shown as an absolute number. Use display_dollar_volume() below
+    for that case."""
     return close * volume
+
+
+def display_dollar_volume(ticker: str, close: pd.Series, volume: pd.Series) -> pd.Series:
+    """dollar_volume(), but safe to show as an absolute $ figure for any
+    ticker - routes around the crypto-pair quirk documented above."""
+    if ticker.endswith("-USD"):
+        return volume
+    return dollar_volume(close, volume)
 
 
 def money_flow_index(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, window: int = 14) -> pd.Series:

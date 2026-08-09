@@ -7,6 +7,24 @@ def parse_tickers(raw: str) -> list:
     # Filter out label-like entries starting/ending with '='
     return [p for p in parts if not p.startswith("=") and not p.endswith("=")]
 
+
+@st.cache_data(ttl=24 * 3600)
+def get_ticker_names(tickers: tuple) -> dict:
+    """Ticker -> short company/asset name (e.g. AAPL -> "Apple Inc."). One
+    request per ticker - Yahoo doesn't offer a batched name lookup - but
+    cached for 24h since names essentially never change, so this only costs
+    real time the first time a given ticker is looked up. tickers must be a
+    tuple (not list) so Streamlit can hash it for the cache key."""
+    names = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t).get_info()
+            names[t] = info.get("shortName") or info.get("longName") or t
+        except Exception as e:
+            print(f"⚠ Error fetching name for {t}: {e}")
+            names[t] = t
+    return names
+
 @st.cache_data(ttl=120)
 def get_avg_volume(tickers, days):
     data = yf.download(

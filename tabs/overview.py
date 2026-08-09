@@ -95,6 +95,17 @@ def _render_liquidity_strip(fred_df: pd.DataFrame):
 
     st.markdown(f'<div class="liquidity-strip">{"".join(cards)}</div>', unsafe_allow_html=True)
 
+    with st.expander("What do these mean?"):
+        st.markdown("""
+In short: money moving **out of idle/parked cash and into the system** (green) tends to help stocks and crypto.
+Tighter conditions (red) tend to hurt them.
+
+- **Fed Balance Sheet** — how much money the Fed has pumped into the financial system by buying bonds. Bigger = more cash available for markets. Green when growing.
+- **ON Reverse Repo** — cash parked overnight at the Fed instead of being invested anywhere. Green when this *shrinks*, because that money is leaving the sidelines and flowing back into markets.
+- **M2 Money Supply** — the total cash and bank deposits in the whole economy. More of it circulating = more fuel for asset prices. Only updates monthly, so it often shows "Flat."
+- **10Y Treasury Yield** — the interest rate on 10-year US government debt; basically the "price of money." When it rises, borrowing gets more expensive, which usually weighs on stocks and crypto — so this one's red when it goes *up*, unlike the other three.
+""")
+
 
 def render(scores: list, sector_prices: pd.DataFrame, fred_df: pd.DataFrame, as_of: str = None):
     st.subheader("Where Is Money Flowing")
